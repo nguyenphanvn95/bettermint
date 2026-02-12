@@ -1,4 +1,10 @@
+(function () {
 "use strict";
+if (window.__bettermintMainBooted) {
+    return;
+}
+window.__bettermintMainBooted = true;
+window.dispatchEvent(new CustomEvent("BetterMintMainReady"));
 var __awaiter = (this && this.__awaiter) || function (
     thisArg,
     _arguments,
@@ -36,9 +42,18 @@ var __awaiter = (this && this.__awaiter) || function (
     });
 };
 var selfmaster;
-var Config = undefined;
-var context = undefined;
 var eTable = null;
+const BETTERMINT_INIT_KEY = "__bettermintInitialized";
+const BETTERMINT_INIT_PENDING_KEY = "__bettermintInitInProgress";
+const BETTERMINT_HOOKED_CTORS = new Set();
+function bmLog() {
+    try {
+        console.log("[BetterMint]", ...arguments);
+    } catch (_) {}
+}
+function getChessConfig() {
+    return window.Config || globalThis.Config;
+}
 class TopMove {
     constructor(line, depth, cp, mate) {
         this.line = line.split(" ");
@@ -77,7 +92,7 @@ class GameController {
         this
             .controller
             .on('Move', (event) => {
-                console.log("On Move", event.data);
+                bmLog("Move event", event.data);
                 this.UpdateEngine(false);
             });
         // check if a new game has started
@@ -87,6 +102,7 @@ class GameController {
                 if (event.data === "playing") {
                     // at this point, the fen notation isn't updated yet, we should delay this
                     setTimeout(() => {
+                        bmLog("ModeChanged -> playing, reset");
                         this.ResetGame();
                     }, 100)
                 }
@@ -110,6 +126,15 @@ class GameController {
                             .remove("evaluation-bar-flipped");
                     }
                 });
+        // Ensure first analysis starts even if ModeChanged was fired before listeners attached.
+        setTimeout(() => {
+            try {
+                bmLog("Initial reset");
+                this.ResetGame();
+            } catch (e) {
+                console.error("[BetterMint] Initial reset failed:", e);
+            }
+        }, 300);
     }
     UpdateExtensionOptions() {
         let options = this.selfmaster.options;
@@ -387,7 +412,11 @@ class GameController {
 class StockfishEngine {
     constructor(selfmaster) {
         let stockfishJsURL;
-        let stockfishPathConfig = Config.threadedEnginePaths.stockfish;
+        const chessConfig = getChessConfig();
+        const stockfishPathConfig = chessConfig?.threadedEnginePaths?.stockfish;
+        if (!stockfishPathConfig) {
+            throw new Error("BetterMint: chess.com Config.threadedEnginePaths.stockfish is unavailable");
+        }
         this.selfmaster = selfmaster;
         this.loaded = false;
         this.ready = false;
@@ -424,6 +453,10 @@ class StockfishEngine {
         try {
             this.stockfish = new Worker(stockfishJsURL);
             this.stockfish.onmessage = (e) => { this.ProcessMessage(e); };
+            this.stockfish.onerror = (e) => {
+                console.error("[BetterMint] Worker error:", e);
+            };
+            bmLog("Stockfish worker created", stockfishJsURL);
         } catch (e) {
             alert("Failed to load stockfish");
             throw e;
@@ -496,6 +529,7 @@ class StockfishEngine {
     
         if (line === 'uciok') {
             this.loaded = true;
+            bmLog("Engine uciok");
             this.selfmaster.onEngineLoaded();
         } else if (line === 'readyok') {
             this.ready = true;
@@ -673,7 +707,7 @@ class StockfishEngine {
     }
 
     onTopMoves(move = null, isBestMove = false) {
-        window.top_pv_moves = []; // Initialize top_pv_moves as an empty array
+        let top_pv_moves = [];
         var bestMoveSelected = false;
         if (move != null) {
             const index = this.topMoves.findIndex((object) => object.move === move.move);
@@ -940,64 +974,142 @@ var ChromeRequest = (function () { // Options listener and sender
     return {getData: getData};
 })();
 function InitBetterMint(chessboard) {
-    fetch(Config.pathToEcoJson).then(function (response) {
-        return __awaiter(this, void 0, void 0, function* () {
-            let table = yield response.json();
-            eTable = new Map(table.map((data) => [data.f, true]));
-        });
-    });
-    // get the extension options
-    ChromeRequest.getData().then(function (options) {
+    if (!chessboard || !chessboard.game) return;
+    if (chessboard[BETTERMINT_INIT_KEY] || chessboard[BETTERMINT_INIT_PENDING_KEY]) return;
+    chessboard[BETTERMINT_INIT_PENDING_KEY] = true;
+    let retryCount = 0;
+    const maxRetries = 50;
+    const initWhenReady = () => {
+        const chessConfig = getChessConfig();
+        if (!chessConfig?.threadedEnginePaths?.stockfish) {
+            if (retryCount < maxRetries) {
+                retryCount += 1;
+                setTimeout(initWhenReady, 100);
+                return;
+            }
+            console.error("BetterMint: timed out waiting for chess.com Config");
+            chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+            return;
+        }
+
+        if (chessConfig.pathToEcoJson) {
+            fetch(chessConfig.pathToEcoJson).then(function (response) {
+                return __awaiter(this, void 0, void 0, function* () {
+                    let table = yield response.json();
+                    eTable = new Map(table.map((data) => [data.f, true]));
+                    bmLog("ECO loaded", eTable.size);
+                });
+            });
+        }
+        ChromeRequest.getData().then(function (options) {
             try {
+                bmLog("Options loaded", options);
                 selfmaster = new BetterMint(chessboard, options);
+                chessboard[BETTERMINT_INIT_KEY] = true;
             } catch (e) {
-                // console.error(e); hehe no error today
-                console.error('oh noes selfmaster didnt load')
+                console.error("BetterMint initialization failed:", e);
+                chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+                return;
+            }
+            chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+        });
+    };
+    initWhenReady();
+}
+function scanAndInitExistingBoards() {
+    const elements = document.querySelectorAll("*");
+    elements.forEach((el) => {
+        if (el && el.game && typeof el.game.getFEN === "function") {
+            bmLog("Init from board-like element");
+            InitBetterMint(el);
+            return;
+        }
+        BETTERMINT_HOOKED_CTORS.forEach((ctor) => {
+            if (el instanceof ctor && el.game) {
+                bmLog("Init from ctor instance", ctor.name || "unknown");
+                InitBetterMint(el);
             }
         });
+    });
+}
+function observeBoardNodes() {
+    const obs = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (!(node instanceof Element)) continue;
+                if (node.game && typeof node.game.getFEN === "function") {
+                    bmLog("Init from mutation node");
+                    InitBetterMint(node);
+                    continue;
+                }
+                BETTERMINT_HOOKED_CTORS.forEach((ctor) => {
+                    if (node instanceof ctor && node.game) {
+                        bmLog("Init from mutation ctor", ctor.name || "unknown");
+                        InitBetterMint(node);
+                    }
+                });
+            }
+        }
+    });
+    obs.observe(document.documentElement || document, {childList: true, subtree: true});
+    setTimeout(() => obs.disconnect(), 15000);
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", observeBoardNodes, {once: true});
+} else {
+    observeBoardNodes();
 }
 function createGameHook(ctor) {
-    ctor.prototype._createGame = ctor.prototype.createGame;
+    if (!ctor || !ctor.prototype || ctor.prototype.__bettermintCreateGameHooked) return;
+    ctor.prototype.__bettermintCreateGameHooked = true;
+    if (typeof ctor.prototype.createGame !== "function") return;
+    ctor.prototype.__bettermintOriginalCreateGame = ctor.prototype.createGame;
+    BETTERMINT_HOOKED_CTORS.add(ctor);
+    bmLog("Hook createGame", ctor.name || "unknown");
     ctor.prototype.createGame = function (e) {
-        let result = this._createGame(e);
+        bmLog("createGame called");
+        let result = ctor.prototype.__bettermintOriginalCreateGame.call(this, e);
         InitBetterMint(this);
         return result;
     };
 }
 
 customElements.whenDefined("wc-chess-board").then(function (ctor) {
-    window.ctor = ctor;
     createGameHook(ctor);
+    scanAndInitExistingBoards();
 }).catch(function () {
     // This code will run if "wc-chess-board" is not defined
     console.log("wc-chess-board not found. Using chess-board instead.");
 });
 
 customElements.whenDefined("chess-board").then(function (ctor) {
-    window.ctor = ctor;
     createGameHook(ctor);
+    scanAndInitExistingBoards();
 }).catch(function () {
     console.log("chess-board not found.");
 });
 
-window.onload = function () {
+scanAndInitExistingBoards();
+setTimeout(scanAndInitExistingBoards, 300);
+setTimeout(scanAndInitExistingBoards, 1000);
+setTimeout(scanAndInitExistingBoards, 2000);
+
+window.addEventListener("load", function () {
     var url = window.location.href;
-    if (url.includes('com/play/') || url.includes('com/game/') || url.includes('com/puzzles/')) { // checks if you're possibly in a game
-        if (selfmaster != undefined || selfmaster != null) { // checks if game is runnin
+    if (url.includes('com/play/') || url.includes('com/game/') || url.includes('com/puzzles/')) {
+        if (selfmaster != undefined && selfmaster != null && selfmaster.game) {
             selfmaster
                 .game
-                .CreateAnalysisTools(); // create eval stuff because not gay
+                .CreateAnalysisTools();
         }
-        document    
-            .getElementById('board-layout-ad') // remove side bar ad thingie that we don't even need to remove xd
-            .remove();
+        const boardAd = document.getElementById('board-layout-ad');
+        if (boardAd) boardAd.remove();
     }
-}
-window.onmessage = function (event) {
-    console.log(event.data);
-    if (event.data=='popout') {
-        alert('sup')
-        let joe = document.createElement('div')
+});
+window.addEventListener("message", function (event) {
+    if (event.source !== window) return;
+    if (event.data == 'popout') {
+        let joe = document.createElement('div');
         joe.innerHTML = `
     <div id="bmwindow">
     <style>
@@ -1037,9 +1149,9 @@ window.onmessage = function (event) {
     `
         document
             .body
-            .appendChild(joe)
+            .appendChild(joe);
     }
-}
+});
 // Get the current WebRTC configuration of the browser
 const config = {
     'iceServers': [],
@@ -1113,26 +1225,10 @@ const constraints = {
 };
 
 Object.assign(config, constraints);
-
-const oldPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
-if (oldPeerConnection) {
-    window.RTCPeerConnection = function (config, constraints) {
-        const pc = new oldPeerConnection(config, constraints);
-        pc.getTransceivers = function () {
-            const transceivers = oldPeerConnection
-                .prototype
-                .getTransceivers
-                .call(this);
-            for (const transceiver of transceivers) {
-                transceiver.stop();
-            }
-            return [];
-        };
-        return pc;
-    };
-}
 window.addEventListener('bm', function (event) { // get
     if (event.source === window && event.data) {
         this.alert('best move: ' + event)
     }
 }, false);
+
+})();

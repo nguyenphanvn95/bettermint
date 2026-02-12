@@ -31,6 +31,13 @@
             "https://*.chess.com/*"
         ],
         "run_at": "document_start"
+    }, {
+        "js": ["js/bettermint.js"],
+        "matches": [
+            "https://*.chess.com/*"
+        ],
+        "run_at": "document_start",
+        "world": "MAIN"
     }],
     "declarative_net_request": {
         "rule_resources": [{

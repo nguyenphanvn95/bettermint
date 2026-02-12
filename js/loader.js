@@ -35,6 +35,10 @@ function requestMainWorldInjection() {
         // If messaging fails, we silently ignore to avoid breaking chess.com.
     }
 }
+let mainWorldLoaded = false;
+window.addEventListener("BetterMintMainReady", function () {
+    mainWorldLoaded = true;
+});
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     // pass the event to injected script
     if (request.data !== 'popout') {
@@ -57,4 +61,10 @@ window.addEventListener("BetterMintGetOptions", function (evt) {
         }));
     });
 });
-requestMainWorldInjection(); // Injects bettermint.js in MAIN world
+// Primary path is manifest "content_scripts" with world:"MAIN".
+// Fallback path keeps compatibility for browsers/builds that ignore that field.
+setTimeout(function () {
+    if (!mainWorldLoaded) {
+        requestMainWorldInjection();
+    }
+}, 50);
