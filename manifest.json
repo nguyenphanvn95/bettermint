@@ -1,64 +1,65 @@
 {
-"update_url": "https://clients2.google.com/service/update2/crx",
-
-    "manifest_version": 3,
-    "name": "BetterMint - Chess",
-    "short_name": "BetterMint - Chess",
-    "icons": {
-        "16": "img/logo-16.png",
-        "48": "img/logo-48.png",
-        "128": "img/logo-128.png"
-    },
-    "version": "1.9.84",
-    "description": "BetterMint is a tool that helps you get better at chess.",
-    "permissions": [
-        "storage",
-        "declarativeNetRequest",
-        "scripting"
-    ],
-    "host_permissions": [
-        "http://*.chess.com/*",
-        "https://*.chess.com/*"
-    ],
-    "content_scripts": [{
-        "js": ["js/loader.js"],
-        "css": [
-            "css/depthbar.css",
-            "css/evalbar.css",
-            "css/material-icon.css"
-        ],
-        "matches": [
-            "https://*.chess.com/*"
-        ],
-        "run_at": "document_start"
-    }, {
-        "js": ["js/bettermint.js"],
-        "matches": [
-            "https://*.chess.com/*"
-        ],
-        "run_at": "document_start",
-        "world": "MAIN"
-    }],
-    "declarative_net_request": {
-        "rule_resources": [{
-            "id": "ruleset_1",
-            "enabled": true,
-            "path": "rules.json"
-        }]
-    },
-    "action": {
-        "default_popup": "html/options.html"
-    },
-    "background": {
-        "service_worker": "background.js"
-    },
-    "web_accessible_resources": [{
-        "resources": [
-            "js/bettermint.js",
-            "html/options.html"
-        ],
-        "matches": [
-            "https://*.chess.com/*"
-        ]
-    }]
+  "manifest_version": 3,
+  "name": "ChessHv3",
+  "version": "9.9",
+  "key" : "chesshv3",
+  "description": "Chess Helper Version 3",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "windows",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://www.chess.com/*",
+    "https://chess.com/*",
+    "https://*.chess.com/*",
+    "https://api.timezonedb.com/*",
+    "https://raw.githubusercontent.com/*",
+    "https://api.github.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "a.js",
+        "b.js",
+        "lib/chess_min.js",
+        "lib/engine.js",
+        "lib/engine.wasm",
+        "lib/explanation-engine.wasm"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
 }
