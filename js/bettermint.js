@@ -46,13 +46,41 @@ var eTable = null;
 const BETTERMINT_INIT_KEY = "__bettermintInitialized";
 const BETTERMINT_INIT_PENDING_KEY = "__bettermintInitInProgress";
 const BETTERMINT_HOOKED_CTORS = new Set();
+const BETTERMINT_BOARD_SELECTOR = "wc-chess-board, chess-board, .board-single, #board, [data-cy='board']";
 function bmLog() {
     try {
         console.log("[BetterMint]", ...arguments);
     } catch (_) {}
 }
+
+bmLog("🚀 BetterMint script loaded on", window.location.href);
+
 function getChessConfig() {
-    return window.Config || globalThis.Config;
+    const config = window.Config || globalThis.Config;
+    if (!config) {
+        bmLog("❌ Config not found! window.Config =", window.Config, "globalThis.Config =", globalThis.Config);
+    }
+    return config;
+}
+function isBoardWithGame(el) {
+    return !!(el && el.game && typeof el.game.getFEN === "function");
+}
+function resolveBoardTarget(node) {
+    if (!node) return null;
+    if (isBoardWithGame(node)) return node;
+    if (typeof node.closest === "function") {
+        const closestBoard = node.closest("wc-chess-board, chess-board");
+        if (isBoardWithGame(closestBoard)) return closestBoard;
+    }
+    if (typeof node.querySelector === "function") {
+        const nestedBoard = node.querySelector("wc-chess-board, chess-board");
+        if (isBoardWithGame(nestedBoard)) return nestedBoard;
+    }
+    if (node.shadowRoot && typeof node.shadowRoot.querySelector === "function") {
+        const shadowBoard = node.shadowRoot.querySelector("wc-chess-board, chess-board");
+        if (isBoardWithGame(shadowBoard)) return shadowBoard;
+    }
+    return null;
 }
 class TopMove {
     constructor(line, depth, cp, mate) {
@@ -88,6 +116,7 @@ class GameController {
         this.evalScore = null;
         this.evalScoreAbbreviated = null;
         this.currentMarkings = [];
+        this.markingsCheckInterval = null;
         let self = this;
         this
             .controller
@@ -159,14 +188,18 @@ class GameController {
             this.RemoveCurrentMarkings();
         }
         if (!options.move_analysis) {
-            let lastMove = this
-                .controller
-                .getLastMove();
-            if (lastMove) {
-                this
+            try {
+                let lastMove = this
                     .controller
-                    .markings
-                    .removeOne(`effect|${lastMove.to}`);
+                    .getLastMove();
+                if (lastMove && this.controller && this.controller.markings && typeof this.controller.markings.removeOne === 'function') {
+                    this
+                        .controller
+                        .markings
+                        .removeOne(`effect|${lastMove.to}`);
+                }
+            } catch (e) {
+                console.error("[BetterMint] Error removing move analysis marking:", e);
             }
         }
     }
@@ -236,9 +269,14 @@ class GameController {
     }
     UpdateEngine(isNewGame) {
         // console.log("UpdateEngine", isNewGame);
+        if (!this.selfmaster || !this.selfmaster.engine) {
+            bmLog("UpdateEngine: engine not available");
+            return; // Engine not available
+        }
         let FENs = this
             .controller
             .getFEN();
+        bmLog("UpdateEngine: FEN =", FENs, "isNewGame =", isNewGame);
         this
             .selfmaster
             .engine
@@ -250,84 +288,245 @@ class GameController {
 
     }
     RemoveCurrentMarkings() {
-        this
-            .currentMarkings
-            .forEach((marking) => {
-                let key = marking.type + "|";
-                if (marking.data.square != null) 
-                    key += marking.data.square;
-                else 
-                    key += `${marking.data.from}${marking.data.to}`;
-                this
-                    .controller
-                    .markings
-                    .removeOne(key);
-            });
-        this.currentMarkings = [];
+        try {
+            if (!this.controller || !this.controller.markings) {
+                this.currentMarkings = [];
+                return;
+            }
+            if (this.currentMarkings.length > 0) {
+                bmLog("Removing", this.currentMarkings.length, "markings");
+            }
+            this
+                .currentMarkings
+                .forEach((marking) => {
+                    try {
+                        let key = marking.type + "|";
+                        if (marking.data.square != null) 
+                            key += marking.data.square;
+                        else 
+                            key += `${marking.data.from}${marking.data.to}`;
+                        if (this.controller.markings && typeof this.controller.markings.removeOne === 'function') {
+                            this.controller.markings.removeOne(key);
+                        }
+                    } catch (e) {
+                        console.error("[BetterMint] Error removing marking:", e);
+                    }
+                });
+            this.currentMarkings = [];
+        } catch (e) {
+            console.error("[BetterMint] Error in RemoveCurrentMarkings:", e);
+            this.currentMarkings = [];
+        }
     }
     HintMoves(topMoves, lastTopMoves, isBestMove) {
         let options = this.selfmaster.options;
-        let bestMove = topMoves[0];
-        if (options.show_hints) {
-            this.RemoveCurrentMarkings();
-            topMoves.forEach((move, idx) => {
-                // isBestMove means final evaluation, don't include the moves that has less
-                // depth than the best move
-                if (isBestMove && move.depth != bestMove.depth) 
-                    return;
-                let color = (idx == 0)
-                    ? this.options.arrowColors.alt
-                    : (idx >= 1 && idx <= 2)
-                        ? this.options.arrowColors.shift
-                        : (idx >= 3 && idx <= 5)
-                            ? this.options.arrowColors.default
-                            : this.options.arrowColors.ctrl;
+        let bestMove = null;
+        try {
+            if (!topMoves || topMoves.length === 0) {
+                bmLog("No top moves to display");
+                return;
+            }
+            bestMove = topMoves[0];
+            bmLog("HintMoves called:", {show_hints: options.show_hints, topMovesCount: topMoves.length, isBestMove});
+            
+            if (options.show_hints) {
+                bmLog("✓ show_hints is TRUE - about to display markings");
+                this.RemoveCurrentMarkings();
+                // Ensure arrowColors exist
+                if (!this.options.arrowColors) {
+                    this.options.arrowColors = {
+                        alt: "#00FF00",
+                        shift: "#FF6347",
+                        default: "#FFFF00",
+                        ctrl: "#FF1493"
+                    };
+                }
+                topMoves.forEach((move, idx) => {
+                    if (!move) return;
+                    try {
+                        // isBestMove means final evaluation, don't include the moves that has less
+                        // depth than the best move
+                        if (isBestMove && move.depth != bestMove.depth) 
+                            return;
+                        let color = (idx == 0)
+                            ? this.options.arrowColors.alt
+                            : (idx >= 1 && idx <= 2)
+                                ? this.options.arrowColors.shift
+                                : (idx >= 3 && idx <= 5)
+                                    ? this.options.arrowColors.default
+                                    : this.options.arrowColors.ctrl;
+                        this
+                            .currentMarkings
+                            .push({
+                                data: {
+                                    from: move.from,
+                                    color: color,
+                                    opacity: 0.8,
+                                    to: move.to
+                                },
+                                node: true,
+                                persistent: true,
+                                type: "arrow"
+                            });
+                        if (move.mate != null) {
+                            this
+                                .currentMarkings
+                                .push({
+                                    data: {
+                                        square: move.to,
+                                        type: move.mate < 0
+                                            ? "ResignWhite"
+                                            : "WinnerWhite"
+                                    },
+                                    node: true,
+                                    persistent: true,
+                                    type: "effect"
+                                });
+                        }
+                    } catch (e) {
+                        console.error("[BetterMint] Error processing move:", move, e);
+                    }
+                });
+                // reverse the markings to make the best move arrow appear on top
                 this
                     .currentMarkings
-                    .push({
-                        data: {
-                            from: move.from,
-                            color: color,
-                            opacity: 0.8,
-                            to: move.to
-                        },
-                        node: true,
-                        persistent: true,
-                        type: "arrow"
-                    });
-                if (move.mate != null) {
-                    this
-                        .currentMarkings
-                        .push({
-                            data: {
-                                square: move.to,
-                                type: move.mate < 0
-                                    ? "ResignWhite"
-                                    : "WinnerWhite"
-                            },
-                            node: true,
-                            persistent: true,
-                            type: "effect"
-                        });
+                    .reverse();
+                
+                bmLog("Attempting to add", this.currentMarkings.length, "markings");
+                bmLog("Controller status:", {hasController: !!this.controller, hasMarkings: !!(this.controller?.markings)});
+                
+                // Add markings with null checks
+                if (this.controller && this.controller.markings && typeof this.controller.markings.addMany === 'function') {
+                    try {
+                        bmLog("Before addMany - currentMarkings:", this.currentMarkings.length);
+                        
+                        // Debug: Log the structure of markings being added
+                        if (this.currentMarkings.length > 0) {
+                            bmLog("Sample marking structure:", JSON.stringify(this.currentMarkings[0]));
+                        }
+                        
+                        this.controller.markings.addMany(this.currentMarkings);
+                        bmLog("✓ Markings added successfully", this.currentMarkings.length);
+                        
+                        // Log what methods exist on markings object
+                        const markingsMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(this.controller.markings)).filter(m => !m.startsWith('_'));
+                        bmLog("Markings available methods:", markingsMethods.slice(0, 15));
+                        
+                        // Check if markings are actually in the controller
+                        try {
+                            const allMarkings = this.controller.markings.getAll?.() || [];
+                            bmLog("Total markings in controller after add:", allMarkings.length);
+                        } catch (e) {
+                            bmLog("getAll() method not available");
+                        }
+                        
+                        // Try multiple methods to force board rendering
+                        if (this.controller && typeof this.controller.redraw === 'function') {
+                            this.controller.redraw();
+                            bmLog("✓ Called controller.redraw()");
+                        } else {
+                            bmLog("✗ controller.redraw() not available");
+                        }
+                        
+                        // Try to trigger update on the board element itself
+                        if (this.chessboard && typeof this.chessboard.requestUpdate === 'function') {
+                            this.chessboard.requestUpdate();
+                            bmLog("✓ Called chessboard.requestUpdate()");
+                        } else if (this.chessboard) {
+                            bmLog("✗ chessboard.requestUpdate() not available");
+                        }
+                        
+                        // Try forcing render by accessing board's internal state
+                        if (this.chessboard && this.chessboard._renderBoard) {
+                            this.chessboard._renderBoard();
+                            bmLog("✓ Called chessboard._renderBoard()");
+                        }
+                        
+                        // Try using dispatchEvent to trigger render
+                        if (this.chessboard) {
+                            const event = new CustomEvent('MarkingsChanged', {detail: {markings: this.currentMarkings}});
+                            this.chessboard.dispatchEvent(event);
+                            bmLog("✓ Dispatched MarkingsChanged event");
+                        }
+                        
+                        // Check board SVG/canvas state
+                        if (this.chessboard) {
+                            const svgElement = this.chessboard.querySelector('svg');
+                            const canvas = this.chessboard.querySelector('canvas');
+                            bmLog("Board SVG element:", !!svgElement, "Canvas element:", !!canvas);
+                            
+                            // Check if there's a markings layer
+                            if (svgElement) {
+                                const markingsGroup = svgElement.querySelector('[data-test="markings"], .markings, g.markings');
+                                bmLog("Markings layer found:", !!markingsGroup);
+                            }
+                        }
+                        
+                        // Watch for board re-renders and re-add markings if they disappear
+                        if (!this.markingsCheckInterval && this.controller && this.controller.markings) {
+                            try {
+                                // Use a simple interval check instead of aggressive MutationObserver
+                                this.markingsCheckInterval = setInterval(() => {
+                                    try {
+                                        const currentMarkings = this.controller.markings.getAll?.() || [];
+                                        if (currentMarkings.length === 0 && this.currentMarkings.length > 0) {
+                                            // Markings disappeared, re-add them
+                                            this.controller.markings.addMany(this.currentMarkings);
+                                        }
+                                    } catch (e) {
+                                        // Silently ignore errors in the interval
+                                    }
+                                }, 500); // Check every 500ms
+                                bmLog("✓ Markings persistence check activated (500ms)");
+                            } catch (e) {
+                                bmLog("Could not set up markings check:", e.message);
+                            }
+                        }
+                    } catch (e) {
+                        console.error("[BetterMint] Error adding markings:", e);
+                        bmLog("✗ Error adding markings:", e.message);
+                    }
+                } else {
+                    const controllerStatus = {
+                        hasController: !!this.controller,
+                        hasMarkings: this.controller ? !!this.controller.markings : false,
+                        markingsType: this.controller?.markings ? typeof this.controller.markings : 'N/A',
+                        hasAddMany: this.controller?.markings ? typeof this.controller.markings.addMany : 'N/A'
+                    };
+                    // Log available methods on controller for debugging
+                    const controllerMethods = this.controller ? Object.getOwnPropertyNames(Object.getPrototypeOf(this.controller)) : [];
+                    bmLog("Controller available methods:", controllerMethods.filter(m => !m.startsWith('_')).slice(0, 20));
+                    console.warn("[BetterMint] Markings system not available:", controllerStatus);
+                    bmLog("✗ Markings unavailable:", controllerStatus);
+                    
+                    // Try alternative method: add markings one by one
+                    if (this.controller && this.controller.markings && typeof this.controller.markings.addOne === 'function') {
+                        bmLog("Trying alternative: adding markings one by one");
+                        try {
+                            this.currentMarkings.forEach((marking) => {
+                                this.controller.markings.addOne(marking);
+                            });
+                            bmLog("✓ Markings added via addOne method");
+                        } catch (e) {
+                            console.error("[BetterMint] Error adding markings one by one:", e);
+                            bmLog("✗ addOne method also failed:", e.message);
+                        }
+                    }
                 }
-            });
-            // reverse the markings to make the best move arrow appear on top
-            this
-                .currentMarkings
-                .reverse();
-            this
-                .controller
-                .markings
-                .addMany(this.currentMarkings);
+            }
+        } catch (e) {
+            console.error("[BetterMint] Error in HintMoves:", e);
         }
         if (options.depth_bar) {
-            let depthPercent = (
-                isBestMove
-                    ? bestMove.depth
-                    : bestMove.depth - 1
-            )
-            / this.selfmaster.engine.depth * 100;
-            this.SetCurrentDepth(depthPercent);
+            if (this.selfmaster && this.selfmaster.engine && this.selfmaster.engine.depth) {
+                let depthPercent = (
+                    isBestMove
+                        ? bestMove.depth
+                        : bestMove.depth - 1
+                )
+                / this.selfmaster.engine.depth * 100;
+                this.SetCurrentDepth(depthPercent);
+            }
         }
         if (options.evaluation_bar) {
             let score = (bestMove.mate != null ? bestMove.mate : bestMove.cp);
@@ -455,26 +654,55 @@ class StockfishEngine {
             this.stockfish.onmessage = (e) => { this.ProcessMessage(e); };
             this.stockfish.onerror = (e) => {
                 console.error("[BetterMint] Worker error:", e);
+                bmLog("BetterMint: Stockfish worker encountered an error. Engine analysis may be unavailable.");
             };
             bmLog("Stockfish worker created", stockfishJsURL);
         } catch (e) {
-            alert("Failed to load stockfish");
-            throw e;
+            console.error("[BetterMint] Failed to load stockfish:", e.message || e);
+            bmLog("BetterMint: Could not load Stockfish engine. This may occur in restricted contexts. Attempting to continue without analysis.");
+            // Set loaded flag to prevent further initialization attempts
+            this.loaded = true;
+            this.ready = true;
+            // Don't throw - allow extension to continue running without engine
+            return;
         }
-        this.send("uci");
-        this.onReady(() => {
-            this.UpdateOptions();
-            this.send("ucinewgame");
-        });
+        try {
+            this.send("uci");
+            this.onReady(() => {
+                this.UpdateOptions();
+                this.send("ucinewgame");
+            });
+        } catch (e) {
+            console.error("[BetterMint] Error initializing stockfish:", e.message || e);
+            bmLog("BetterMint: Error initializing Stockfish. Extension will continue without analysis.");
+        }
         
     }
     send(cmd) {
-        this.stockfish.postMessage(cmd);
+        if (this.stockfish && typeof this.stockfish.postMessage === 'function') {
+            if (cmd && cmd.length < 150) {
+                if (cmd === 'isready') {
+                    bmLog("→ Sending to engine: isready (callbacks queued:", this.readyCallbacks.length, ", ready=", this.ready, ")");
+                } else if (cmd === 'stop') {
+                    bmLog("→ Sending to engine: stop (isEvaluating=", this.isEvaluating, ")");
+                } else {
+                    bmLog("→ Sending to engine:", cmd);
+                }
+            }
+            this.stockfish.postMessage(cmd);
+        } else {
+            bmLog("❌ Cannot send to engine - stockfish not available or postMessage not a function");
+        }
     }
     go() {
+        if (!this.stockfish) {
+            bmLog("go(): stockfish worker not available");
+            return; // Engine not available
+        }
         this.onReady(() => {
             this.stopEvaluation(() => {
                 console.assert(!this.isEvaluating, "Duplicated Stockfish go command");
+                bmLog("go(): sending go depth", this.depth);
                 this.isEvaluating = true;
                 this.send(`go depth ${this.depth}`);
             });
@@ -492,19 +720,27 @@ class StockfishEngine {
     stopEvaluation(callback) {
         // stop the evaluation if it is evaluating
         if (this.isEvaluating) {
+            bmLog("stopEvaluation: isEvaluating=true, sending stop, queuing callback");
             // cancel the previous callbacks, replace it with this one
             this.goDoneCallbacks = [callback];
             this.isRequestedStop = true;
             this.send("stop");
         }
         else {
+            bmLog("stopEvaluation: isEvaluating=false, calling callback immediately");
             // if there is no evaluation going on, call the function immediately
             callback();
         }
     }
     UpdatePosition(FENs = null, isNewGame = true) {
-        this.onReady(() => {
-            this.stopEvaluation(() => {
+        bmLog(">>> UpdatePosition called: FENs provided =", FENs ? "YES" : "NO", "isNewGame =", isNewGame);
+        console.trace("UpdatePosition trace");
+        // CRITICAL: Stop evaluation FIRST before trying to get ready
+        // Otherwise onReady() will send isready while engine is still analyzing
+        this.stopEvaluation(() => {
+            bmLog(">>> UpdatePosition: stopEvaluation callback fired, now calling onReady");
+            this.onReady(() => {
+                bmLog(">>> UpdatePosition: onReady callback fired, ready =", this.ready);
                 this.MoveAndGo(FENs, isNewGame);
             });
         });
@@ -526,6 +762,16 @@ class StockfishEngine {
     ProcessMessage(event) {
         this.ready = false;
         let line = (event && typeof event === "object") ? event.data : event;
+        
+        // Log all messages from engine to see what's happening
+        if (line && line.length < 200) {
+            bmLog("Engine msg:", line.substring(0, 100));
+        }
+        
+        // Log bestmove and bestMoveMatch for debugging
+        if (line && line.startsWith('bestmove')) {
+            bmLog("✓ Engine bestmove:", line);
+        }
     
         if (line === 'uciok') {
             this.loaded = true;
@@ -533,10 +779,14 @@ class StockfishEngine {
             this.selfmaster.onEngineLoaded();
         } else if (line === 'readyok') {
             this.ready = true;
-            if (this.readyCallbacks.length > 0) {
+            const callbackCount = this.readyCallbacks.length;
+            bmLog("✓✓✓ Engine readyok - ready set to true, executing", callbackCount, "callbacks, isEvaluating=", this.isEvaluating);
+            if (callbackCount > 0) {
                 let copy = this.readyCallbacks;
                 this.readyCallbacks = [];
                 copy.forEach(function (callback) { callback(); });
+            } else {
+                bmLog("WARNING: readyok received but NO callbacks queued!");
             }
         } else if (this.isEvaluating && line === 'Load eval file success: 1') {
             // We have sent the "go" command before Stockfish loaded the eval file.
@@ -562,6 +812,7 @@ class StockfishEngine {
                     }
                 }
             } else if (bestMoveMatch) {
+                bmLog("✓ Best move found:", bestMoveMatch[1], "from topMoves:", this.topMoves.length);
                 this.isEvaluating = false;
                 if (this.goDoneCallbacks.length > 0) {
                     let copy = this.goDoneCallbacks;
@@ -575,7 +826,9 @@ class StockfishEngine {
                     if (index < 0) {
                         // The engine's best move is not in the top move list; handle it gracefully
                         console.warn(`The engine returned the best move "${bestMove}" but it's not in the top move list.`);
+                        bmLog("✗ Best move not in topMoves list. topMoves:", this.topMoves.map(m => m.move));
                     } else {
+                        bmLog("✓ Calling onTopMoves with isBestMove=true");
                         this.onTopMoves(this.topMoves[index], true);
                     }
                 }
@@ -585,7 +838,10 @@ class StockfishEngine {
     }    
     MoveAndGo(FENs = null, isNewGame = true) {
         // let it go, let it gooo
+        bmLog("MoveAndGo called: FENs =", FENs ? FENs.substring(0, 30) + "..." : "null", "isNewGame =", isNewGame);
         let go = () => {
+            bmLog("Engine go() anonymous function executing");
+            bmLog("Engine go() called, FEN:", FENs ? FENs.substring(0, 50) + "..." : "null");
             this.lastTopMoves = isNewGame ? [] : this.topMoves;
             this.lastMoveScore = null;
             this.topMoves = [];
@@ -597,16 +853,23 @@ class StockfishEngine {
                 if (eTable.get(shortFen) !== true)
                     this.isInTheory = false;
             }
-            if (FENs != null)
+            if (FENs != null) {
+                bmLog("Sending position fen to engine");
                 this.send(`position fen ${FENs}`);
+            }
+            bmLog("About to call go() method");
             this.go();
         };
+        bmLog("MoveAndGo: calling onReady, isNewGame =", isNewGame);
         this.onReady(() => {
+            bmLog("MoveAndGo: onReady callback fired");
             if (isNewGame) {
+                bmLog("MoveAndGo: isNewGame=true, sending ucinewgame");
                 this.send("ucinewgame");
                 this.onReady(go);
             }
             else {
+                bmLog("MoveAndGo: isNewGame=false, analyzing current position - calling go() immediately");
                 go();
             }
         });
@@ -709,6 +972,8 @@ class StockfishEngine {
     onTopMoves(move = null, isBestMove = false) {
         let top_pv_moves = [];
         var bestMoveSelected = false;
+        bmLog("onTopMoves:", {move: move?.move, isBestMove, topMovesCount: this.topMoves.length});
+        
         if (move != null) {
             const index = this.topMoves.findIndex((object) => object.move === move.move);
             if (isBestMove) { //  basically engine just finished evaluation lmao
@@ -747,6 +1012,7 @@ class StockfishEngine {
             // If a best move has been selected, consider all moves in topMoves
             top_pv_moves = this.topMoves.slice(0, this.options["MultiPV"]);
             // sort by rank in multipv
+            bmLog("Best move selected, calling HintMoves with", top_pv_moves.length, "moves");
             this.selfmaster.game.HintMoves(top_pv_moves, this.lastTopMoves, isBestMove);
 
             if (this.selfmaster.options.move_analysis) {
@@ -911,17 +1177,37 @@ class StockfishEngine {
 }
 class BetterMint {
     constructor(chessboard, options) {
+        bmLog("✓ BetterMint constructor called");
         this.options = options;
         this.game = new GameController(this, chessboard);
-        this.engine = new StockfishEngine(this);
+        bmLog("✓ GameController created");
+        try {
+            this.engine = new StockfishEngine(this);
+            bmLog("✓ Stockfish engine initialized");
+        } catch (e) {
+            console.error("[BetterMint] Failed to initialize Stockfish engine:", e);
+            bmLog("❌ Failed to initialize engine - extension will run without analysis");
+            // Create a stub engine object to prevent undefined errors
+            this.engine = {
+                depth: 0,
+                topMoves: [],
+                UpdateExtensionOptions: () => {},
+                UpdatePosition: () => {},
+                go: () => {},
+                stop: () => {},
+                send: () => {},
+                onReady: (cb) => {},
+                isEvaluating: false
+            };
+        }
         window.addEventListener("BetterMintUpdateOptions", (event) => {
             this.options = event.detail;
             this
                 .game
                 .UpdateExtensionOptions();
-            this
-                .engine
-                .UpdateExtensionOptions();
+            if (this.engine && this.engine.UpdateExtensionOptions) {
+                this.engine.UpdateExtensionOptions();
+            }
             // show a notification when the settings is updated, but only if the previous
             // notification has gone
             if (window.toaster && window.toaster.notifications.findIndex((noti) => noti.id == "bettermint-settings-updated") == -1) {
@@ -974,23 +1260,51 @@ var ChromeRequest = (function () { // Options listener and sender
     return {getData: getData};
 })();
 function InitBetterMint(chessboard) {
-    if (!chessboard || !chessboard.game) return;
-    if (chessboard[BETTERMINT_INIT_KEY] || chessboard[BETTERMINT_INIT_PENDING_KEY]) return;
-    chessboard[BETTERMINT_INIT_PENDING_KEY] = true;
+    const board = resolveBoardTarget(chessboard) || chessboard;
+    if (!board) {
+        bmLog("InitBetterMint: chessboard is null/undefined");
+        return;
+    }
+    
+    // If no game property yet, retry in 100ms (useful for live mode)
+    if (!isBoardWithGame(board)) {
+        if (board[BETTERMINT_INIT_PENDING_KEY]) return; // Already retrying
+        board[BETTERMINT_INIT_PENDING_KEY] = true;
+        bmLog("Board game property not ready, retrying in 100ms");
+        setTimeout(() => {
+            board[BETTERMINT_INIT_PENDING_KEY] = false;
+            const retryBoard = resolveBoardTarget(board) || board;
+            if (isBoardWithGame(retryBoard) && !retryBoard[BETTERMINT_INIT_KEY]) {
+                InitBetterMint(retryBoard);
+            }
+        }, 100);
+        return;
+    }
+    
+    if (board[BETTERMINT_INIT_KEY] || board[BETTERMINT_INIT_PENDING_KEY]) {
+        bmLog("Board already initialized or pending");
+        return;
+    }
+    board[BETTERMINT_INIT_PENDING_KEY] = true;
     let retryCount = 0;
     const maxRetries = 50;
     const initWhenReady = () => {
         const chessConfig = getChessConfig();
         if (!chessConfig?.threadedEnginePaths?.stockfish) {
+            if (retryCount === 0) {
+                bmLog("Waiting for chess.com Config (retry", retryCount, "/", maxRetries, ")");
+            }
             if (retryCount < maxRetries) {
                 retryCount += 1;
                 setTimeout(initWhenReady, 100);
                 return;
             }
-            console.error("BetterMint: timed out waiting for chess.com Config");
-            chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+            bmLog("❌ ERROR: timed out waiting for chess.com Config");
+            board[BETTERMINT_INIT_PENDING_KEY] = false;
             return;
         }
+        
+        bmLog("✓ Config found with Stockfish");
 
         if (chessConfig.pathToEcoJson) {
             fetch(chessConfig.pathToEcoJson).then(function (response) {
@@ -1002,41 +1316,91 @@ function InitBetterMint(chessboard) {
             });
         }
         ChromeRequest.getData().then(function (options) {
+            bmLog("✓ Options received from ChromeRequest");
             try {
                 bmLog("Options loaded", options);
-                selfmaster = new BetterMint(chessboard, options);
-                chessboard[BETTERMINT_INIT_KEY] = true;
+                selfmaster = new BetterMint(board, options);
+                board[BETTERMINT_INIT_KEY] = true;
+                bmLog("✓ BetterMint fully initialized, markings will show up now");
             } catch (e) {
                 console.error("BetterMint initialization failed:", e);
-                chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+                bmLog("❌ BetterMint initialization error:", e.message);
+                board[BETTERMINT_INIT_PENDING_KEY] = false;
                 return;
             }
-            chessboard[BETTERMINT_INIT_PENDING_KEY] = false;
+            board[BETTERMINT_INIT_PENDING_KEY] = false;
+        }).catch(function (err) {
+            bmLog("❌ ChromeRequest.getData() failed:", err);
+            board[BETTERMINT_INIT_PENDING_KEY] = false;
         });
     };
     initWhenReady();
 }
 function scanAndInitExistingBoards() {
+    // First, try to find any element with game property (standard boards)
     const elements = document.querySelectorAll("*");
+    let foundBoard = false;
     elements.forEach((el) => {
         if (el && el.game && typeof el.game.getFEN === "function") {
-            bmLog("Init from board-like element");
+            bmLog("✓ Init from board-like element");
             InitBetterMint(el);
+            foundBoard = true;
             return;
         }
         BETTERMINT_HOOKED_CTORS.forEach((ctor) => {
             if (el instanceof ctor && el.game) {
-                bmLog("Init from ctor instance", ctor.name || "unknown");
+                bmLog("✓ Init from ctor instance", ctor.name || "unknown");
                 InitBetterMint(el);
+                foundBoard = true;
             }
         });
     });
+    
+    // For live mode, also try to find by common board IDs
+    if (!foundBoard) {
+        const liveBoards = document.querySelectorAll("[id*='board'], wc-chess-board, chess-board");
+        if (liveBoards.length > 0) {
+            bmLog("Found " + liveBoards.length + " board elements");
+            liveBoards.forEach((board) => {
+                if (board && !board[BETTERMINT_INIT_KEY]) {
+                    // Only log if it has a game property (real board)
+                    if (board.game && typeof board.game.getFEN === "function") {
+                        bmLog("✓ Found live mode board with game:", board.id || board.tagName);
+                        InitBetterMint(board);
+                        foundBoard = true;
+                    } else {
+                        bmLog("Found board but no .game property:", board.id || board.tagName);
+                    }
+                }
+            });
+        }
+    }
 }
 function observeBoardNodes() {
+    // Watch for board elements being added
     const obs = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (!(node instanceof Element)) continue;
+                
+                // Check if it's a board element
+                if (node.tagName === 'WC-CHESS-BOARD' || node.tagName === 'CHESS-BOARD' || 
+                    (node.id && node.id.includes('board'))) {
+                    bmLog("Detected board element:", node.tagName, node.id);
+                    // Try to initialize immediately
+                    if (node.game && typeof node.game.getFEN === "function") {
+                        InitBetterMint(node);
+                        continue;
+                    }
+                    // If no game property yet, check again in 100ms
+                    setTimeout(() => {
+                        if (node.game && typeof node.game.getFEN === "function" && !node[BETTERMINT_INIT_KEY]) {
+                            bmLog("Board game property ready:", node.id);
+                            InitBetterMint(node);
+                        }
+                    }, 100);
+                }
+                
                 if (node.game && typeof node.game.getFEN === "function") {
                     bmLog("Init from mutation node");
                     InitBetterMint(node);
@@ -1058,6 +1422,19 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", observeBoardNodes, {once: true});
 } else {
     observeBoardNodes();
+}
+
+// Aggressively scan for boards and keep trying until we find one
+if (window.location.href.includes('chess.com/game/') || 
+    window.location.href.includes('chess.com/play/') ||
+    window.location.href.includes('chess.com/live/') ||
+    window.location.href.includes('chess.com/puzzles/')) {
+    const aggressiveScanInterval = setInterval(() => {
+        scanAndInitExistingBoards();
+    }, 500);
+    
+    // Stop aggressive scanning after 30 seconds
+    setTimeout(() => clearInterval(aggressiveScanInterval), 30000);
 }
 function createGameHook(ctor) {
     if (!ctor || !ctor.prototype || ctor.prototype.__bettermintCreateGameHooked) return;
@@ -1093,10 +1470,14 @@ scanAndInitExistingBoards();
 setTimeout(scanAndInitExistingBoards, 300);
 setTimeout(scanAndInitExistingBoards, 1000);
 setTimeout(scanAndInitExistingBoards, 2000);
+// Extra aggressive scanning for live mode which loads boards slower
+setTimeout(scanAndInitExistingBoards, 3500);
+setTimeout(scanAndInitExistingBoards, 5000);
 
 window.addEventListener("load", function () {
     var url = window.location.href;
-    if (url.includes('com/play/') || url.includes('com/game/') || url.includes('com/puzzles/')) {
+    // Support for play, game, puzzles, and live modes
+    if (url.includes('com/play/') || url.includes('com/game/') || url.includes('com/puzzles/') || url.includes('com/live/')) {
         if (selfmaster != undefined && selfmaster != null && selfmaster.game) {
             selfmaster
                 .game
@@ -1232,3 +1613,4 @@ window.addEventListener('bm', function (event) { // get
 }, false);
 
 })();
+
